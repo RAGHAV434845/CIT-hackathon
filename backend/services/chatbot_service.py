@@ -1,37 +1,21 @@
-"""
-AI Chatbot Service
-===================
-Intelligent assistant that uses structured analysis results
-to answer questions about the repository.
 
-Uses Ollama (llama3) for natural language responses.
-Does NOT send entire repository — only structured metadata.
-"""
 
 import os
 import json
 import logging
-import requests
 from typing import Optional
+from services.ollama_analyzer_service import OllamaAnalyzerService
+from services.repo_service import get_repo_path
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-
-def _ollama_available():
-    """Check if Ollama server is reachable."""
-    try:
-        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-OLLAMA_READY = _ollama_available()
-if OLLAMA_READY:
-    logger.info(f"Ollama is available at {OLLAMA_URL} (model: {OLLAMA_MODEL})")
-else:
-    logger.warning("Ollama not reachable. Chatbot will use fallback mode.")
+# Try to import Gemini
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    logger.warning("google-generativeai not installed. Chatbot will use fallback mode.")
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +75,8 @@ DETERMINISTIC_QUERIES = {
     "how many files": lambda r: f"The project has **{r.get('total_files', 0)}** files and **{r.get('total_lines', 0):,}** lines of code.",
     "languages": lambda r: _format_languages(r),
     "folder structure": lambda r: _format_folder_structure(r),
+    "where to start": lambda r: _format_getting_started(r),
+    "how to develop": lambda r: _format_getting_started(r),
 }
 
 
@@ -147,21 +133,135 @@ def _format_folder_structure(r):
     return f"**Folder Structure:**\n```\n{tree_str}\n```"
 
 
+def _format_getting_started(r):
+    lines = ["### 🚀 Getting Started for Developers"]
+    
+    # 1. Entry points
+    eps = r.get("entry_points", [])
+    if eps:
+        lines.append(f"\n**Main Entry Point:** `{eps[0]['file']}`")
+    else:
+        # Fallback: look for common entry point names in the file list
+        files = r.get("files", [])
+        common_entries = ["app.py", "main.py", "index.js", "App.js", "App.tsx", "index.tsx", "server.js"]
+        found_entry = next((f for f in files if any(e in f for e in common_entries)), None)
+        if found_entry:
+            lines.append(f"\n**Likely Entry Point:** `{found_entry}`")
+
+    # 2. Extract folder names for heuristics
+    folders = []
+    def extract_folders(tree, current_path=""):
+        for name, value in tree.items():
+            full_path = f"{current_path}/{name}" if current_path else name
+            folders.append(full_path.lower())
+            if isinstance(value, dict):
+                extract_folders(value, full_path)
+    
+    extract_folders(r.get("folder_structure", {}))
+
+    # 3. Backend Guidance (Heuristic)
+    backend_dirs = [f for f in folders if any(k in f for k in ["backend", "route", "controller", "service", "model", "api"])]
+    is_python = any(f.endswith(".py") for f in r.get("files", []))
+    is_node_backend = any(f in r.get("files", []) for f in ["package.json", "server.js", "app.js"])
+    
+    if backend_dirs or is_python or is_node_backend:
+        lines.append("\n**Backend Development:**")
+        if is_python:
+            lines.append("- For Python/Flask: Start with `app.py` or `main.py` in the `backend/` directory.")
+        elif is_node_backend:
+            lines.append("- For Node.js: Check `server.js` or `app.js` and `package.json` scripts.")
+            
+        routes = [f for f in backend_dirs if "route" in f]
+        if routes:
+            lines.append(f"- API endpoints/routes are typically in `{routes[0]}`.")
+        
+        services = [f for f in backend_dirs if "service" in f]
+        if services:
+            lines.append(f"- Business logic is likely in `{services[0]}`.")
+
+    # 4. Frontend Guidance (Heuristic)
+    frontend_patterns = ["frontend", "src", "page", "view", "component", "client", "ui", "public"]
+    frontend_dirs = [f for f in folders if any(k in f for k in frontend_patterns)]
+    
+    if frontend_dirs:
+        lines.append("\n**Frontend Development:**")
+        
+        # Look for the root of frontend
+        fe_root = next((f for f in frontend_dirs if f == "frontend" or f == "client" or f == "ui"), None)
+        if fe_root:
+            lines.append(f"- The frontend project is located in the `{fe_root}/` directory.")
+        
+        src = [f for f in frontend_dirs if f == "src" or f.endswith("/src") or "frontend/src" in f]
+        if src:
+            lines.append(f"- Core source code is in `{src[0]}`.")
+            
+        pages = [f for f in frontend_dirs if "page" in f or "view" in f]
+        if pages:
+            lines.append(f"- UI Pages/Views are located in `{pages[0]}`.")
+            
+        components = [f for f in frontend_dirs if "component" in f]
+        if components:
+            lines.append(f"- Reusable UI components are in `{components[0]}`.")
+
+    lines.append("\nTo provide more specific guidance, try asking about 'API endpoints' or 'folder structure'.")
+    return "\n".join(lines)
+
+
 class ChatbotService:
     """Repository-aware chatbot."""
 
-    def __init__(self, analysis_result: dict, repo_name: str = "Project"):
+    def __init__(self, analysis_result: dict, repo_name: str = "Project", repo_id: str = None):
         self.result = analysis_result
         self.repo_name = repo_name
-        self.use_ollama = OLLAMA_READY
+        self.repo_id = repo_id
+        self.model = None
+        self._ollama_arch_cache = None
+
+        if GEMINI_AVAILABLE:
+            api_key = os.getenv("GEMINI_API_KEY", "")
+            if api_key:
+                try:
+                    genai.configure(api_key=api_key)
+                    self.model = genai.GenerativeModel(
+                        os.getenv("GEMINI_MODEL", "gemini-pro")
+                    )
+                    logger.info("Gemini model initialized for chatbot")
+                except Exception as e:
+                    logger.error(f"Failed to init Gemini: {e}")
+        
+        # Initialize Ollama Analyzer
+        repo_path = get_repo_path(repo_id) if repo_id else None
+        if repo_path:
+            self.ollama = OllamaAnalyzerService(repo_path)
+            logger.info(f"Ollama Analyzer initialized for repo {repo_id}")
+        else:
+            self.ollama = None
+            logger.warning(f"Could not find local path for repo {repo_id}. Ollama features disabled.")
 
     def _build_context(self) -> str:
         """Build structured context string from analysis."""
+        # Check if we have Ollama architecture data cached
+        if self.ollama and not self._ollama_arch_cache:
+            try:
+                # This might be slow first time, but we cache it
+                self._ollama_arch_cache = self.ollama.analyze_architecture()
+            except:
+                self._ollama_arch_cache = "Unavailable"
+
+        frameworks = ", ".join(self.result.get("framework", ["Unknown"]))
+        architecture = self.result.get("architecture_type", "Unknown")
+        tech_stack = ", ".join(self.result.get("tech_stack", []))
+
+        # Enrichment from Ollama if available
+        ollama_arch_info = ""
+        if self._ollama_arch_cache and "Ollama" in self._ollama_arch_cache:
+             ollama_arch_info = f"\nADDITIONAL ARCHITECTURAL INSIGHTS (Ollama):\n{self._ollama_arch_cache}\n"
+
         return SYSTEM_PROMPT.format(
             repo_name=self.repo_name,
-            frameworks=", ".join(self.result.get("framework", ["Unknown"])),
-            architecture=self.result.get("architecture_type", "Unknown"),
-            tech_stack=", ".join(self.result.get("tech_stack", [])),
+            frameworks=frameworks,
+            architecture=architecture,
+            tech_stack=tech_stack,
             total_files=self.result.get("total_files", 0),
             total_lines=self.result.get("total_lines", 0),
             languages=json.dumps(self.result.get("languages", {}), indent=2),
@@ -173,7 +273,7 @@ class ChatbotService:
             ),
             database_usage=json.dumps(self.result.get("database_usage", []), indent=2),
             folder_structure=json.dumps(self.result.get("folder_structure", {}), indent=2)[:2000],
-        )
+        ) + ollama_arch_info
 
     def chat(self, user_message: str) -> str:
         """Process user message and return response."""
@@ -191,33 +291,70 @@ class ChatbotService:
         if "circular" in msg_lower and "depend" in msg_lower:
             return self._detect_circular_deps()
 
-        # Fall back to LLM
-        if self.use_ollama:
+        # Ollama Specific Commands (Smarter matching)
+        if self.ollama:
+            if any(k in msg_lower for k in ["analyze architecture", "what architecture", "tell me about architecture"]):
+                return self.ollama.analyze_architecture()
+            
+            if any(k in msg_lower for k in ["scan for secrets", "security scan", "security status", "any secrets"]):
+                return self.ollama.scan_for_secrets()
+            
+            if any(k in msg_lower for k in ["check syntax", "python syntax", "syntax error"]):
+                return self.ollama.detect_syntax_errors()
+            
+            if any(k in msg_lower for k in ["diagram", "mermaid", "visualize"]):
+                return self.ollama.generate_mermaid_diagram()
+
+        # Fall back to LLM (Gemini or Ollama Fallback)
+        if self.model:
             return self._llm_response(user_message)
+        
+        # If Gemini is not available but Ollama is, use Ollama for general questions
+        if self.ollama:
+            return self._ollama_fallback_llm(user_message)
 
         return self._fallback_response(user_message)
 
+    def _ollama_fallback_llm(self, user_message: str) -> str:
+        """Use Ollama as a general LLM when Gemini is unavailable."""
+        if not self.ollama._is_ollama_available():
+            return self._fallback_response(user_message)
+            
+        context = self._build_context()
+        prompt = f"{context}\n\nUser Question: {user_message}\n\nAssistant:"
+        
+        try:
+            response = requests.post(
+                self.ollama.ollama_url,
+                json={
+                    "model": self.ollama.model,
+                    "prompt": prompt,
+                    "stream": False
+                },
+                timeout=30
+            )
+            return response.json().get("response", self._fallback_response(user_message))
+        except:
+            return self._fallback_response(user_message)
+
     def _llm_response(self, user_message: str) -> str:
-        """Get response from Ollama (llama3)."""
+        """Get response from Gemini."""
         try:
             context = self._build_context()
             prompt = f"{context}\n\nUser Question: {user_message}"
-            resp = requests.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-                timeout=120,
-            )
-            if resp.status_code == 200:
-                return resp.json().get("response", "No response from model.")
-            logger.error(f"Ollama API error: {resp.status_code} {resp.text}")
-            return self._fallback_response(user_message)
+            response = self.model.generate_content(prompt)
+            return response.text
         except Exception as e:
-            logger.error(f"Ollama API error: {e}")
+            logger.error(f"Gemini API error: {e}")
             return self._fallback_response(user_message)
 
     def _fallback_response(self, user_message: str) -> str:
         """Provide basic response without LLM."""
         msg_lower = user_message.lower()
+
+        # Handle Role-Based/Getting Started questions
+        if any(w in msg_lower for w in ["backend", "frontend", "start", "develop", "begin"]):
+            return _format_getting_started(self.result)
 
         if "login" in msg_lower or "auth" in msg_lower:
             auth_files = [f for f in self.result.get("files", [])

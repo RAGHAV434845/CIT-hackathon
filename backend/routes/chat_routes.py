@@ -1,4 +1,3 @@
-"""Chatbot routes."""
 
 from flask import Blueprint, request, jsonify
 from middleware.auth_middleware import require_auth, get_current_uid
@@ -33,7 +32,7 @@ def chat_with_repo(repo_id):
 
     # Get or create chatbot instance
     if repo_id not in _chatbot_cache:
-        _chatbot_cache[repo_id] = ChatbotService(analysis, repo.get("name", "Project"))
+        _chatbot_cache[repo_id] = ChatbotService(analysis, repo.get("name", "Project"), repo_id)
 
     chatbot = _chatbot_cache[repo_id]
     response = chatbot.chat(message)

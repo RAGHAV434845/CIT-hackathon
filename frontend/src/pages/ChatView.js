@@ -33,14 +33,13 @@ export default function ChatView() {
   };
 
   const suggestions = [
+    'Analyze architecture (Ollama)',
+    'Scan for secrets (Ollama)',
+    'Check Python syntax (Ollama)',
+    'Generate architecture diagram',
     'What tech stack does this project use?',
-    'What is the architecture pattern?',
-    'Show me the API endpoints',
     'What are the entry points?',
     'Find unused files',
-    'Detect circular dependencies',
-    'Explain the folder structure',
-    'What databases are used?',
   ];
 
   return (
@@ -54,11 +53,10 @@ export default function ChatView() {
         <div className="flex-1 bg-white rounded-xl border border-gray-200 overflow-y-auto p-4 mb-4" style={{ maxHeight: '60vh' }}>
           {messages.map((msg, i) => (
             <div key={i} className={`mb-4 flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[80%] px-4 py-3 rounded-xl text-sm ${
-                msg.role === 'user'
+              <div className={`max-w-[80%] px-4 py-3 rounded-xl text-sm ${msg.role === 'user'
                   ? 'bg-primary-600 text-white'
                   : 'bg-gray-100 text-gray-800'
-              }`}>
+                }`}>
                 {msg.role === 'assistant' ? (
                   <div className="prose prose-sm max-w-none">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
