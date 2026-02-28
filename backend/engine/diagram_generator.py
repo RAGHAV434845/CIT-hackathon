@@ -26,49 +26,64 @@ class DiagramGenerator:
         arch = self.result.get("architecture_type", "Monolithic")
 
         lines = ["graph TB"]
-        lines.append(f'    title["{framework} - {arch} Architecture"]')
-        lines.append('    style title fill:#f9f,stroke:#333,stroke-width:2px')
+        lines.append(f'    Title["{framework} - {arch} Architecture"]')
+        lines.append('    style Title fill:#f9f,stroke:#333,stroke-width:2px')
         lines.append("")
 
+        # Track first node in each layer for connections
+        api_first = None
+        svc_first = None
+        model_first = None
+        db_first = None
+
         # Client layer
-        lines.append("    subgraph Client")
+        lines.append("    subgraph ClientLayer[Client]")
         lines.append('        UI["User Interface / Browser"]')
         lines.append("    end")
         lines.append("")
 
         # API layer
-        if "routes" in components or "controllers" in components:
-            lines.append("    subgraph API Layer")
+        has_api = "routes" in components or "controllers" in components
+        if has_api:
+            lines.append("    subgraph APILayer[API Layer]")
             if "routes" in components:
                 route_files = components["routes"][:5]
                 for i, f in enumerate(route_files):
                     name = f.split("/")[-1].replace(".py", "").replace(".js", "")
                     lines.append(f'        R{i}["{name}"]')
+                    if api_first is None:
+                        api_first = f"R{i}"
             if "controllers" in components:
                 ctrl_files = components["controllers"][:5]
                 for i, f in enumerate(ctrl_files):
                     name = f.split("/")[-1].replace(".py", "").replace(".js", "")
                     lines.append(f'        C{i}["{name}"]')
+                    if api_first is None:
+                        api_first = f"C{i}"
             lines.append("    end")
             lines.append("")
 
         # Service layer
         if "services" in components:
-            lines.append("    subgraph Service Layer")
+            lines.append("    subgraph SvcLayer[Service Layer]")
             svc_files = components["services"][:5]
             for i, f in enumerate(svc_files):
                 name = f.split("/")[-1].replace(".py", "").replace(".js", "")
                 lines.append(f'        S{i}["{name}"]')
+                if svc_first is None:
+                    svc_first = f"S{i}"
             lines.append("    end")
             lines.append("")
 
         # Model layer
         if "models" in components:
-            lines.append("    subgraph Data Layer")
+            lines.append("    subgraph DataLayer[Data Layer]")
             model_files = components["models"][:5]
             for i, f in enumerate(model_files):
                 name = f.split("/")[-1].replace(".py", "").replace(".js", "")
                 lines.append(f'        M{i}["{name}"]')
+                if model_first is None:
+                    model_first = f"M{i}"
             lines.append("    end")
             lines.append("")
 
@@ -76,26 +91,35 @@ class DiagramGenerator:
         db_usage = self.result.get("database_usage", [])
         if db_usage:
             db_names = list(set(d["database"] for d in db_usage))[:3]
-            lines.append("    subgraph Database")
+            lines.append("    subgraph DBLayer[Database]")
             for i, db in enumerate(db_names):
                 lines.append(f'        DB{i}[("{db}")]')
+                if db_first is None:
+                    db_first = f"DB{i}"
             lines.append("    end")
             lines.append("")
 
-        # Connections
-        lines.append("    UI --> API Layer")
-        if "services" in components:
-            lines.append("    API Layer --> Service Layer")
-            if "models" in components:
-                lines.append("    Service Layer --> Data Layer")
-            if db_usage:
-                lines.append("    Service Layer --> Database")
-        elif "models" in components:
-            lines.append("    API Layer --> Data Layer")
-            if db_usage:
-                lines.append("    Data Layer --> Database")
-        elif db_usage:
-            lines.append("    API Layer --> Database")
+        # Connections — link node IDs, not subgraph names
+        if has_api and api_first:
+            lines.append(f"    UI --> {api_first}")
+        elif svc_first:
+            lines.append(f"    UI --> {svc_first}")
+
+        if "services" in components and svc_first:
+            if api_first:
+                lines.append(f"    {api_first} --> {svc_first}")
+            if "models" in components and model_first:
+                lines.append(f"    {svc_first} --> {model_first}")
+            if db_first:
+                lines.append(f"    {svc_first} --> {db_first}")
+        elif "models" in components and model_first:
+            if api_first:
+                lines.append(f"    {api_first} --> {model_first}")
+            if db_first:
+                lines.append(f"    {model_first} --> {db_first}")
+        elif db_first:
+            if api_first:
+                lines.append(f"    {api_first} --> {db_first}")
 
         return "\n".join(lines)
 
@@ -126,10 +150,10 @@ class DiagramGenerator:
                 lines.append('    Entry --> Router["Router / URL Dispatcher"]')
 
                 for method, routes in methods.items():
-                    method_id = method.replace(" ", "")
+                    method_id = f"M_{method.replace(' ', '')}"
                     lines.append(f'    Router --> {method_id}["{method}"]')
                     for i, route in enumerate(routes[:3]):
-                        safe_route = route.replace('"', "'")
+                        safe_route = route.replace('"', "'").replace('<', '').replace('>', '')
                         lines.append(f'    {method_id} --> {method_id}R{i}["{safe_route}"]')
 
                 lines.append('    Router --> Response["Response"]')

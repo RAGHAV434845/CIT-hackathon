@@ -5,7 +5,7 @@ from middleware.auth_middleware import require_auth, get_current_uid
 from services.repo_service import get_repo
 from services.firebase_service import (
     add_document, get_document, update_document,
-    query_collection, log_analytics_event
+    query_collection, delete_document, log_analytics_event
 )
 from engine.diagram_generator import DiagramGenerator
 
@@ -30,6 +30,17 @@ def generate_diagrams(repo_id):
     diagram_type = data.get("type", "all")  # architecture, flow, dependency, all
 
     generator = DiagramGenerator(analysis)
+
+    # Delete old diagrams for this repo before generating new ones
+    old_diagrams = query_collection(
+        "diagrams",
+        filters=[("repo_id", "==", repo_id)],
+        limit=100,
+    )
+    for old in old_diagrams:
+        old_id = old.get("id")
+        if old_id:
+            delete_document("diagrams", old_id)
 
     if diagram_type == "all":
         diagrams = generator.generate_all()

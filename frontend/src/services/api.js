@@ -90,14 +90,24 @@ export const getUserStats = (uid) => api.get(`/analytics/user/${uid}`);
 // ---- Faculty ----
 export const createProject = (data) => api.post('/faculty/projects', data);
 export const listProjects = () => api.get('/faculty/projects');
-export const scoreProject = (projectId, scores) =>
-  api.put(`/faculty/projects/${projectId}/score`, scores);
-export const addStudentToProject = (projectId, studentUid) =>
-  api.post(`/faculty/projects/${projectId}/add-student`, { student_uid: studentUid });
+export const scoreProject = (projectId, studentUid, marks, comments) =>
+  api.put(`/faculty/projects/${projectId}/score`, { student_uid: studentUid, marks, comments });
+export const addStudentToProject = (projectId, studentIdentifier) =>
+  api.post(`/faculty/projects/${projectId}/add-student`, { student_uid: studentIdentifier });
 export const addRepoToProject = (projectId, repoId) =>
   api.post(`/faculty/projects/${projectId}/add-repo`, { repo_id: repoId });
 export const listStudents = (department) =>
   api.get(`/faculty/students${department ? `?department=${department}` : ''}`);
+export const getMyProjects = () => api.get('/faculty/my-projects');
+export const submitProject = (projectId, githubUrl) =>
+  api.post(`/faculty/projects/${projectId}/submit`, { github_url: githubUrl });
+
+// ---- Collaborators ----
+export const getCollaborators = (repoId) => api.get(`/repos/${repoId}/collaborators`);
+export const addCollaborator = (repoId, email) =>
+  api.post(`/repos/${repoId}/collaborators`, { email });
+export const removeCollaborator = (repoId, collabUid) =>
+  api.delete(`/repos/${repoId}/collaborators/${collabUid}`);
 
 // ---- HOD ----
 export const listFaculty = (department) =>

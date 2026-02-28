@@ -6,7 +6,7 @@ from services.repo_service import (
     create_repo_record, clone_github_repo, handle_zip_upload,
     list_user_repos, get_repo, delete_repo
 )
-from services.firebase_service import update_document
+from services.firebase_service import update_document, query_collection, get_user_doc
 import requests as http_requests
 
 repo_bp = Blueprint("repos", __name__)
@@ -67,10 +67,23 @@ def create_repository():
 @repo_bp.route("", methods=["GET"])
 @require_auth
 def list_repos():
-    """List current user's repositories."""
+    """List current user's repositories + repos shared via collaboration."""
     uid = get_current_uid()
-    repos = list_user_repos(uid)
-    return jsonify({"repositories": repos}), 200
+    own_repos = list_user_repos(uid)
+
+    # Also include repos where user is a collaborator
+    all_repos = query_collection("repositories", limit=1000)
+    collab_repos = [r for r in all_repos
+                    if uid in r.get("collaborators", []) and r.get("owner_uid") != uid]
+
+    # Merge, avoiding duplicates
+    own_ids = {r.get("id") for r in own_repos}
+    for cr in collab_repos:
+        if cr.get("id") not in own_ids:
+            cr["is_collaborator"] = True
+            own_repos.append(cr)
+
+    return jsonify({"repositories": own_repos}), 200
 
 
 @repo_bp.route("/<repo_id>", methods=["GET"])
@@ -124,3 +137,100 @@ def search_public_repos():
         return jsonify({"error": "GitHub API error"}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ────────────── Collaborator endpoints ──────────────
+
+@repo_bp.route("/<repo_id>/collaborators", methods=["GET"])
+@require_auth
+def get_collaborators(repo_id):
+    """List collaborators of a repository."""
+    repo = get_repo(repo_id)
+    if not repo:
+        return jsonify({"error": "Repository not found"}), 404
+
+    uid = get_current_uid()
+    if repo.get("owner_uid") != uid and uid not in repo.get("collaborators", []):
+        return jsonify({"error": "Access denied"}), 403
+
+    collaborator_uids = repo.get("collaborators", [])
+    collaborators = []
+    for c_uid in collaborator_uids:
+        user_doc = get_user_doc(c_uid)
+        if user_doc:
+            collaborators.append({
+                "uid": c_uid,
+                "email": user_doc.get("email", ""),
+                "name": user_doc.get("name", user_doc.get("email", "")),
+            })
+        else:
+            collaborators.append({"uid": c_uid, "email": "", "name": "Unknown"})
+
+    return jsonify({"collaborators": collaborators}), 200
+
+
+@repo_bp.route("/<repo_id>/collaborators", methods=["POST"])
+@require_auth
+def add_collaborator(repo_id):
+    """Add a collaborator to a repository by email."""
+    repo = get_repo(repo_id)
+    if not repo:
+        return jsonify({"error": "Repository not found"}), 404
+
+    uid = get_current_uid()
+    if repo.get("owner_uid") != uid:
+        return jsonify({"error": "Only the owner can add collaborators"}), 403
+
+    data = request.get_json() or {}
+    email = data.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "email is required"}), 400
+
+    # Look up user by email
+    all_users = query_collection("users", limit=5000)
+    target_user = None
+    for u in all_users:
+        if u.get("email", "").lower() == email:
+            target_user = u
+            break
+
+    if not target_user:
+        return jsonify({"error": f"No user found with email {email}"}), 404
+
+    target_uid = target_user.get("id") or target_user.get("uid")
+    if not target_uid:
+        return jsonify({"error": "Could not resolve user ID"}), 500
+
+    if target_uid == uid:
+        return jsonify({"error": "Cannot add yourself as a collaborator"}), 400
+
+    collaborators = repo.get("collaborators", [])
+    if target_uid in collaborators:
+        return jsonify({"message": "User is already a collaborator"}), 200
+
+    collaborators.append(target_uid)
+    update_document("repositories", repo_id, {"collaborators": collaborators})
+
+    return jsonify({"message": f"Added {email} as collaborator"}), 200
+
+
+@repo_bp.route("/<repo_id>/collaborators/<collab_uid>", methods=["DELETE"])
+@require_auth
+def remove_collaborator(repo_id, collab_uid):
+    """Remove a collaborator from a repository."""
+    repo = get_repo(repo_id)
+    if not repo:
+        return jsonify({"error": "Repository not found"}), 404
+
+    uid = get_current_uid()
+    if repo.get("owner_uid") != uid:
+        return jsonify({"error": "Only the owner can remove collaborators"}), 403
+
+    collaborators = repo.get("collaborators", [])
+    if collab_uid not in collaborators:
+        return jsonify({"error": "User is not a collaborator"}), 404
+
+    collaborators.remove(collab_uid)
+    update_document("repositories", repo_id, {"collaborators": collaborators})
+
+    return jsonify({"message": "Collaborator removed"}), 200

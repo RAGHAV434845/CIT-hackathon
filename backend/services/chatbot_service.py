@@ -4,24 +4,34 @@ AI Chatbot Service
 Intelligent assistant that uses structured analysis results
 to answer questions about the repository.
 
-Uses Google Gemini API for natural language responses.
+Uses Ollama (llama3) for natural language responses.
 Does NOT send entire repository — only structured metadata.
 """
 
 import os
 import json
 import logging
+import requests
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Try to import Gemini
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-    logger.warning("google-generativeai not installed. Chatbot will use fallback mode.")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+
+def _ollama_available():
+    """Check if Ollama server is reachable."""
+    try:
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+OLLAMA_READY = _ollama_available()
+if OLLAMA_READY:
+    logger.info(f"Ollama is available at {OLLAMA_URL} (model: {OLLAMA_MODEL})")
+else:
+    logger.warning("Ollama not reachable. Chatbot will use fallback mode.")
 
 
 # ---------------------------------------------------------------------------
@@ -143,19 +153,7 @@ class ChatbotService:
     def __init__(self, analysis_result: dict, repo_name: str = "Project"):
         self.result = analysis_result
         self.repo_name = repo_name
-        self.model = None
-
-        if GEMINI_AVAILABLE:
-            api_key = os.getenv("GEMINI_API_KEY", "")
-            if api_key:
-                try:
-                    genai.configure(api_key=api_key)
-                    self.model = genai.GenerativeModel(
-                        os.getenv("GEMINI_MODEL", "gemini-pro")
-                    )
-                    logger.info("Gemini model initialized for chatbot")
-                except Exception as e:
-                    logger.error(f"Failed to init Gemini: {e}")
+        self.use_ollama = OLLAMA_READY
 
     def _build_context(self) -> str:
         """Build structured context string from analysis."""
@@ -194,20 +192,27 @@ class ChatbotService:
             return self._detect_circular_deps()
 
         # Fall back to LLM
-        if self.model:
+        if self.use_ollama:
             return self._llm_response(user_message)
 
         return self._fallback_response(user_message)
 
     def _llm_response(self, user_message: str) -> str:
-        """Get response from Gemini."""
+        """Get response from Ollama (llama3)."""
         try:
             context = self._build_context()
             prompt = f"{context}\n\nUser Question: {user_message}"
-            response = self.model.generate_content(prompt)
-            return response.text
+            resp = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("response", "No response from model.")
+            logger.error(f"Ollama API error: {resp.status_code} {resp.text}")
+            return self._fallback_response(user_message)
         except Exception as e:
-            logger.error(f"Gemini API error: {e}")
+            logger.error(f"Ollama API error: {e}")
             return self._fallback_response(user_message)
 
     def _fallback_response(self, user_message: str) -> str:
